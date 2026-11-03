@@ -11,10 +11,27 @@ Web 聊天框（`ctx.commands` 指令适配器）和 QQ 机器人通道都能用
 | --- | --- |
 | `/think` | 显示当前思考等级、当前模型，并列出该模型全部可切换等级 |
 | `/think low` | 切换到 `low`（等级不区分大小写，也接受显示名） |
-| `/think <等级>` | 切换到该模型支持的任意等级（如 `off` / `low` / `high` / `max`，以模型实际开放的等级为准） |
-| `/think 高` | 中文别名：关闭 / 低 / 中 / 高 / 最高（映射到模型实际存在的等级） |
+| `/think <等级>` | 切换到该模型支持的任意等级（如 `off` / `minimal` / `low` / `medium` / `high` / `max`，以模型实际开放的为准） |
+| `/think 高` | 中文/概念别名：关闭 / 最低 / 低 / 中 / 高 / 很高 / 最高 / 思考（自动落到当前模型对应的一档） |
+| `/think 默认` | 清除显式等级，恢复模型默认思考等级 |
 
 切换从**下一轮回复**开始生效；选择写入会话的 `model/selection` 事件，因此会持久保存在会话里。
+
+## 不同模型的思考等级不一样（v1.5.0+）
+
+DeepSeek 官方开放 `off/low/high/max`，MiMo（xiaomi）开放 `off/minimal/low/medium/high`，
+其它模型还可能带 `xhigh`，或者只开放 `off`。插件不再要求你记住"当前模型恰好叫哪一级"：
+
+- 概念词（`最高` / `中` / `max` / `medium` / `最低` …）会映射到当前模型**最接近的一档**，
+  并在回复里明确写出实际选择了哪一档；
+- 例如在 MiMo 上 `/think 最高`（或 `/think max`）会切到 `high`（MiMo 没有 `max`），
+  回复里会注明"当前模型没有「最高」这一档，已选择最接近的 high"；
+- 反过来在 DeepSeek 上 `/think 中`（或 `medium`）会切到 `high`（DeepSeek 没有 `medium`，
+  `high` 就是它默认的平衡档）；
+- `/think` 列表会显示当前模型真实开放的等级；如果会话里带着别的模型留下的等级
+  （比如从 DeepSeek 的 `max` 换到 MiMo），会标注"当前模型不支持，下一轮会失败"，
+  并提示用 `/think 默认` 清除；
+- `/think 默认` 清掉显式等级，下一轮回到模型默认（Web 与 QQ 一致）。
 
 ## 为什么需要这个插件
 
@@ -36,6 +53,12 @@ QQ 插件有自己的斜杠指令表，未知的 `/xxx` 会被当作普通消息
    通过 `ctx.commands.execute(agent, line, …)` 执行**与 Web 完全同一个**指令处理函数；
 3. 用 `bot.sendMarkdown` 把结果直接回复到 QQ，该消息不会进入模型上下文。
 
+QQ 端切换模型走的是 QQ 插件自己的 `/model`（fork 一个新 Session、并记录 per-peer 路由）。
+fork 出来的会话里仍带着上一个模型的请求头，所以当该 peer 存在显式 `/model` 覆盖时，`/think`
+会直接采用 QQ 插件记录的 per-peer 路由，而不是按会话里的历史请求头猜模型 ——
+`/model` 切到 MiMo 后紧接着发 `/think` 也不会列成 DeepSeek 的等级、更不会把模型改回 DeepSeek。
+没有显式覆盖时（例如 Web 端改过全局默认模型），仍以当前 Session 自己的路由（含上一次 `/think` 的选择）为准。
+
 QQ 里的 `/think` 回复与 QQ 插件自带的 `/model` 一致：每个可切换等级都会渲染成一个
 `<qqbot-cmd-input>` **指令输入条**，点一下就把 `/think <等级>` 填进 QQ 输入框，再发送即可切换，
 不用手打等级名。Web 端仍然是原来的纯文本列表（Web 输入框有自己的 `/` 指令菜单）。
@@ -51,6 +74,9 @@ QQ 里的 `/think` 回复与 QQ 插件自带的 `/model` 一致：每个可切�
 优先走 Harness 的会话级 model-selection 通道（与 Web 模型选择器同一个 `selectForNextRequest` / `model/selection` 事件）：
 安装到该 Agent 上下文的请求路由，下一轮生效，并且**不会**顺手改掉 profile 的全局默认模型。
 没有该服务的精简组合回退为追加 `model/selection` 事件并设置 `agent.options.reasoningEffort`。
+
+切换前会用 `ctx.llm.resolveCallConfig` 按当前模型校验等级；校验通过的选择才写入，
+不支持的等级不会被塞进会话（`/think 默认` 则写入不带 `reasoningEffort` 的选择）。
 
 ## 安装
 
@@ -98,8 +124,9 @@ node --import ./test/register-resolve-hook.mjs test/qq-bridge.test.mjs
 # 或 npm test
 ```
 
-覆盖等级展示/切换、中文别名、错误分支、QQ emit 拦截、SessionManager 捕获、QQ 点击填充指令条
-（`<qqbot-cmd-input>`）与回复。测试需要本机装有 dsh，且默认 profile（`web`）里装了
+覆盖等级展示/切换、中文别名、跨模型等级换算（DeepSeek 的 `off/low/high/max` 与
+MiMo 的 `off/minimal/low/medium/high`）、`/think 默认`、错误分支、QQ emit 拦截、
+SessionManager 捕获、QQ 点击填充指令条（`<qqbot-cmd-input>`）与回复。测试需要本机装有 dsh，且默认 profile（`web`）里装了
 `@tencent-connect/dsh-qqbot`（QQ 部分直接 patch 真实原型）。路径不同时用环境变量覆盖：
 
 | 变量 | 默认值 | 用途 |
@@ -119,6 +146,7 @@ node --import ./test/register-resolve-hook.mjs test/qq-bridge.test.mjs
 ## 注意
 
 - 某些模型没有声明 `reasoningEfforts` 元数据（例如手写 profile 未给 pi-ai 模型配置等级），此时 `/think` 会明确提示"没有开放思考等级"，而不是猜测。
+- 跨模型换算只作用于"等级深浅"这一维：`最高` 对应当前模型最深的一档，`最低` 对应最浅的思考档（不会落到 `off`），`中` 在缺 `medium` 的模型上偏向更高一档（如 DeepSeek 的 `high`）。
 - QQ 桥接依赖 `@tencent-connect/dsh-qqbot` 的 `SessionManager` 内部模块路径（已在 0.5.2 验证）；升级 QQ 插件大版本后若改动该路径，桥接会记录一条 warning 并自动跳过，不影响 Web 端 `/think`。
 - 本插件只切当前会话，不改 profile 里 `agent-default-model` 的全局默认值。
 

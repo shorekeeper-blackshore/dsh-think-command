@@ -12,8 +12,13 @@
  */
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
+import { mkdtempSync } from 'node:fs'
 import assert from 'node:assert/strict'
+
+// The plugin writes a bridge diagnostic file on activation; keep the offline
+// run from clobbering the running Host's file (which names the live pid).
+process.env.DSH_THINK_STATUS_DIR ??= mkdtempSync(path.join(tmpdir(), 'dsh-think-status-'))
 
 const PROFILE_DIR =
   process.env.DSH_PROFILE_DIR ??
@@ -51,6 +56,7 @@ const checkAsync = async (name, fn) => {
 }
 
 // ── fake Host context for the command core ─────────────────────────────
+/** DeepSeek official: off / low / high / max. */
 const REASONING = {
   efforts: [
     { id: 'off', name: 'Off', description: '关闭思考' },
@@ -61,10 +67,24 @@ const REASONING = {
   defaultEffort: 'high',
 }
 
-function makeAgent() {
+/** MiMo (xiaomi, llm-pi-ai): off / minimal / low / medium / high, no default. */
+const MIMO_REASONING = {
+  efforts: [
+    { id: 'off', name: 'Off' },
+    { id: 'minimal', name: 'Minimal' },
+    { id: 'low', name: 'Low' },
+    { id: 'medium', name: 'Medium' },
+    { id: 'high', name: 'High' },
+  ],
+}
+
+/** A model that can only turn thinking off. */
+const OFF_ONLY_REASONING = { efforts: [{ id: 'off', name: 'Off' }], defaultEffort: 'off' }
+
+function makeAgent({ route = { provider: 'deepseek-official', model: 'deepseek-flash' } } = {}) {
   const appended = []
   return {
-    options: { provider: 'deepseek-official', model: 'deepseek-flash' },
+    options: { ...route },
     session: {
       id: 'session-1',
       append: (type, data) => appended.push({ type, data }),
@@ -74,20 +94,20 @@ function makeAgent() {
   }
 }
 
-function makeCtx({ controller } = {}) {
+function makeCtx({ controller, reasoning = REASONING, projection, route = { provider: 'deepseek-official', model: 'deepseek-flash' } } = {}) {
   const calls = { resolveCallConfig: [], resolveModelInfo: [] }
   return {
     calls,
     get(key) {
-      if (key === 'sessionProjections') return { stateOf: () => undefined }
+      if (key === 'sessionProjections') return { stateOf: () => projection }
       if (key === 'sessionController') return controller
-      if (key === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'p', model: 'm' }) }
+      if (key === 'agentDefaultModel') return { currentSelection: () => route }
       return undefined
     },
     llm: {
       async resolveModelInfo(provider, model) {
         calls.resolveModelInfo.push([provider, model])
-        return { provider, model, reasoning: REASONING }
+        return { provider, model, reasoning }
       },
       async resolveCallConfig(config) {
         calls.resolveCallConfig.push(config)
@@ -404,6 +424,228 @@ await checkAsync('no reasoning metadata reports a model that cannot switch', asy
   const result = await invokeWith(ctx, { agent: makeAgent(), rawInput: 'low', signal: new AbortController().signal })
   assert.equal(result.kind, 'error')
   assert.match(result.text, /没有开放思考等级/)
+})
+
+// ── cross-model level fitting (DeepSeek vs MiMo vocabularies) ─────────
+const MIMO_ROUTE = { provider: 'xiaomi', model: 'mimo-v2.6-flash' }
+const DEEPSEEK_ROUTE = { provider: 'deepseek-official', model: 'deepseek-flash' }
+
+async function switchWith({ reasoning, route, agentRoute, rawInput }) {
+  const ctx = makeCtx({ reasoning, route })
+  const agent = makeAgent({ route: agentRoute ?? route })
+  const result = await invokeWith(ctx, { agent, rawInput, signal: new AbortController().signal })
+  return { ctx, agent, result }
+}
+
+await checkAsync('MiMo: /think 最低 (a level only MiMo has) switches to minimal', async () => {
+  const { ctx, agent, result } = await switchWith({ reasoning: MIMO_REASONING, route: MIMO_ROUTE, rawInput: '最低' })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /切换为 minimal/)
+  assert.deepEqual(ctx.calls.resolveCallConfig[0], { ...MIMO_ROUTE, reasoningEffort: 'minimal' })
+  assert.equal(agent.options.reasoningEffort, 'minimal')
+})
+
+await checkAsync('MiMo: /think 中 picks its medium level', async () => {
+  const { agent, result } = await switchWith({ reasoning: MIMO_REASONING, route: MIMO_ROUTE, rawInput: '中' })
+  assert.match(result.text, /切换为 medium/)
+  assert.equal(agent.options.reasoningEffort, 'medium')
+})
+
+await checkAsync('MiMo: /think 最高 (DeepSeek naming) fits the highest available level', async () => {
+  const { agent, result } = await switchWith({ reasoning: MIMO_REASONING, route: MIMO_ROUTE, rawInput: '最高' })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /切换为 high/)
+  assert.match(result.text, /当前模型没有「最高」这一档/)
+  assert.equal(agent.options.reasoningEffort, 'high')
+})
+
+await checkAsync('MiMo: /think max (a DeepSeek-only id) fits instead of erroring', async () => {
+  const { agent, result } = await switchWith({ reasoning: MIMO_REASONING, route: MIMO_ROUTE, rawInput: 'max' })
+  assert.match(result.text, /切换为 high/)
+  assert.equal(agent.options.reasoningEffort, 'high')
+})
+
+await checkAsync('MiMo: /think 高 still resolves exactly to high', async () => {
+  const { result } = await switchWith({ reasoning: MIMO_REASONING, route: MIMO_ROUTE, rawInput: '高' })
+  assert.match(result.text, /切换为 high/)
+  assert.ok(!result.text.includes('当前模型没有'))
+})
+
+await checkAsync('DeepSeek: /think 中 fits to high (DeepSeek has no medium)', async () => {
+  const { agent, result } = await switchWith({ reasoning: REASONING, route: DEEPSEEK_ROUTE, rawInput: '中' })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /切换为 high/)
+  assert.match(result.text, /当前模型没有「中」这一档/)
+  assert.equal(agent.options.reasoningEffort, 'high')
+})
+
+await checkAsync('DeepSeek: /think 最低 fits to low', async () => {
+  const { agent, result } = await switchWith({ reasoning: REASONING, route: DEEPSEEK_ROUTE, rawInput: '最低' })
+  assert.match(result.text, /切换为 low/)
+  assert.equal(agent.options.reasoningEffort, 'low')
+})
+
+await checkAsync('DeepSeek: /think on resolves through the model default', async () => {
+  const { agent, result } = await switchWith({ reasoning: REASONING, route: DEEPSEEK_ROUTE, rawInput: '思考' })
+  assert.match(result.text, /切换为 high/)
+  assert.equal(agent.options.reasoningEffort, 'high')
+})
+
+await checkAsync('/think 默认 clears the explicit level', async () => {
+  const ctx = makeCtx({ reasoning: MIMO_REASONING, route: MIMO_ROUTE })
+  const agent = makeAgent({ route: MIMO_ROUTE })
+  agent.options.reasoningEffort = 'medium'
+  const result = await invokeWith(ctx, { agent, rawInput: '默认', signal: new AbortController().signal })
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /已恢复模型默认思考等级/)
+  assert.deepEqual(agent.session.appended[0], { type: 'model/selection', data: { ...MIMO_ROUTE } })
+  assert.equal(agent.options.reasoningEffort, undefined)
+})
+
+await checkAsync('/think listing fits MiMo levels and shows the cross-model hint', async () => {
+  const ctx = makeCtx({ reasoning: MIMO_REASONING, route: MIMO_ROUTE })
+  const agent = makeAgent({ route: MIMO_ROUTE })
+  const result = await invokeWith(ctx, { agent, rawInput: '', signal: new AbortController().signal })
+  assert.match(result.text, /• minimal: Minimal — 最低/)
+  assert.match(result.text, /• medium: Medium — 中/)
+  assert.match(result.text, /不同模型开放的等级不同/)
+  assert.doesNotMatch(result.text, /• max:/)
+})
+
+await checkAsync('/think flags a level inherited from another model as unsupported', async () => {
+  const projection = { pending: { ...MIMO_ROUTE, reasoningEffort: 'max' }, lastUsed: null }
+  const ctx = makeCtx({ reasoning: MIMO_REASONING, route: MIMO_ROUTE, projection })
+  const agent = makeAgent({ route: MIMO_ROUTE })
+  const result = await invokeWith(ctx, { agent, rawInput: '', signal: new AbortController().signal })
+  assert.match(result.text, /当前: max ⚠️/)
+  assert.match(result.text, /\/think 默认 清除/)
+})
+
+await checkAsync('a model that only offers off reports no switchable level', async () => {
+  const { result } = await switchWith({ reasoning: OFF_ONLY_REASONING, route: MIMO_ROUTE, rawInput: 'low' })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /只开放手动关闭思考/)
+})
+
+await checkAsync('QQ /think 最低 switches on the MiMo channel too', async () => {
+  const ctx = makeCtx({ reasoning: MIMO_REASONING, route: MIMO_ROUTE })
+  const replies = await qqRoundTrip(ctx, '/think 最低')
+  assert.equal(replies.length, 1)
+  assert.match(replies[0][1], /切换为 minimal/)
+})
+
+await checkAsync('QQ /think targets the peer route reported by the QQ plugin after /model', async () => {
+  // The QQ plugin switches models by forking a Session, so its inherited
+  // request headers still describe the old model. The bridge must use the
+  // QQ plugin's own per-peer route instead of the stale Session projection.
+  const ctx = makeCtx({ reasoning: MIMO_REASONING, route: MIMO_ROUTE })
+  const applied = []
+  ctx.get = (key) => {
+    if (key === 'sessionController') {
+      return { agents: { selectForNextRequest: (_agent, selection) => applied.push(selection) } }
+    }
+    if (key === 'sessionProjections') {
+      return { stateOf: () => ({ pending: null, lastUsed: { ...DEEPSEEK_ROUTE, reasoningEffort: 'max' } }) }
+    }
+    if (key === 'agentDefaultModel') return { currentSelection: () => DEEPSEEK_ROUTE }
+    return undefined
+  }
+  activeCtx = ctx
+  const agent = makeAgent({ route: DEEPSEEK_ROUTE })
+  const manager = {
+    getSessionRecord: (scope, peerId) => (scope === 'c2c' && peerId === 'peer-route' ? { agent } : undefined),
+    getEffectiveModel: (scope, peerId) => (scope === 'c2c' && peerId === 'peer-route' ? MIMO_ROUTE : undefined),
+    sessionKey: (scope, peerId) => `qqbot:app-route:${scope}:${peerId}`,
+    modelResolver: { hasOverride: () => true },
+  }
+  const commandCtx = {
+    ...ctx,
+    commands: {
+      async execute(gotAgent, gotLine) {
+        const rawInput = gotLine.replace(/^\/think(?:\s+|$)/, '')
+        const result = await captured.handler({
+          agent: gotAgent,
+          rawInput,
+          signal: new AbortController().signal,
+        })
+        return { commandId: 'qq-route', result }
+      },
+    },
+  }
+  const replies = []
+  const bot = { appId: 'app-route', async sendMarkdown(target, content) { replies.push([target, content]) } }
+  const mCtx = {
+    message: { content: '/think 最低', kind: 'c2c', senderId: 'peer-route' },
+    replyTarget: { scope: 'c2c', targetId: 'peer-route', msgId: 'mr' },
+  }
+  await plugin.handleQqThink({
+    ctx: commandCtx,
+    bot,
+    mCtx,
+    line: '/think 最低',
+    managers: new Map([['app-route', manager]]),
+    logger: {},
+  })
+  assert.equal(replies.length, 1)
+  assert.match(replies[0][1], /切换为 minimal/)
+  assert.deepEqual(applied, [{ ...MIMO_ROUTE, reasoningEffort: 'minimal' }])
+})
+
+await checkAsync('QQ /think keeps its own selection while no /model override exists', async () => {
+  // The Web picker can move the global default after a QQ Session started; the
+  // active Session's own route must win over that default when the peer has no
+  // explicit /model override.
+  const ctx = makeCtx({ reasoning: MIMO_REASONING, route: MIMO_ROUTE })
+  const applied = []
+  ctx.get = (key) => {
+    if (key === 'sessionController') {
+      return { agents: { selectForNextRequest: (_agent, selection) => applied.push(selection) } }
+    }
+    if (key === 'sessionProjections') {
+      return { stateOf: () => ({ pending: null, lastUsed: { ...MIMO_ROUTE, reasoningEffort: 'medium' } }) }
+    }
+    if (key === 'agentDefaultModel') return { currentSelection: () => DEEPSEEK_ROUTE }
+    return undefined
+  }
+  activeCtx = ctx
+  const agent = makeAgent({ route: MIMO_ROUTE })
+  const manager = {
+    getSessionRecord: (scope, peerId) => (scope === 'c2c' && peerId === 'peer-keep' ? { agent } : undefined),
+    // The QQ plugin would fall back to the (now DeepSeek) global default here.
+    getEffectiveModel: () => DEEPSEEK_ROUTE,
+    sessionKey: (scope, peerId) => `qqbot:app-keep:${scope}:${peerId}`,
+    modelResolver: { hasOverride: () => false },
+  }
+  const commandCtx = {
+    ...ctx,
+    commands: {
+      async execute(gotAgent, gotLine) {
+        const rawInput = gotLine.replace(/^\/think(?:\s+|$)/, '')
+        const result = await captured.handler({
+          agent: gotAgent,
+          rawInput,
+          signal: new AbortController().signal,
+        })
+        return { commandId: 'qq-keep', result }
+      },
+    },
+  }
+  const replies = []
+  const bot = { appId: 'app-keep', async sendMarkdown(target, content) { replies.push([target, content]) } }
+  const mCtx = {
+    message: { content: '/think 高', kind: 'c2c', senderId: 'peer-keep' },
+    replyTarget: { scope: 'c2c', targetId: 'peer-keep', msgId: 'mk' },
+  }
+  await plugin.handleQqThink({
+    ctx: commandCtx,
+    bot,
+    mCtx,
+    line: '/think 高',
+    managers: new Map([['app-keep', manager]]),
+    logger: {},
+  })
+  assert.equal(replies.length, 1)
+  assert.deepEqual(applied, [{ ...MIMO_ROUTE, reasoningEffort: 'high' }])
 })
 
 if (failures > 0) {
