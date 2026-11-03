@@ -3,7 +3,7 @@
 在聊天里用 `/think` 查看、切换当前会话**思考（reasoning / thinking）等级**的 DeepSeek Harness 插件。
 Web 聊天框（`ctx.commands` 指令适配器）和 QQ 机器人通道都能用。
 
-> 包名是 `dsh-think-command-v3`（早期迭代留下的名字），仓库名是 `dsh-think-command`；安装时以 `github:rootAyaka/dsh-think-command` 这个仓库目标为准。
+> 包名是 `dsh-think-command-v3`（早期迭代留下的名字），仓库名是 `dsh-think-command`；安装时以 `github:shorekeeper-blackshore/dsh-think-command` 这个仓库目标为准。
 
 ## 指令
 
@@ -85,13 +85,13 @@ QQ 里的 `/think` 回复与 QQ 插件自带的 `/model` 一致：每个可切�
 用插件管理器（设置 → 插件 → 自定义安装）填：
 
 ```
-github:rootAyaka/dsh-think-command
+github:shorekeeper-blackshore/dsh-think-command
 ```
 
 或命令行：
 
 ```bash
-dsh plugin --profile web add github:rootAyaka/dsh-think-command
+dsh plugin --profile web add github:shorekeeper-blackshore/dsh-think-command
 ```
 
 装完重启 `dsh web`（或在插件管理器里启用）生效。包内声明了 `dsh.bundle`，宿主会按 profile 的依赖自动挂载该 bundle，

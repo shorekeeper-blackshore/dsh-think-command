@@ -1,6 +1,6 @@
 {
   "name": "dsh-think-command-v3",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Human-facing /think command: inspect and switch the current session's reasoning (thinking) level; works in the Web command adapter and on the QQ bot channel",
   "private": true,
   "type": "module",
@@ -27,11 +27,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rootAyaka/dsh-think-command.git"
+    "url": "git+https://github.com/shorekeeper-blackshore/dsh-think-command.git"
   },
-  "homepage": "https://github.com/rootAyaka/dsh-think-command#readme",
+  "homepage": "https://github.com/shorekeeper-blackshore/dsh-think-command#readme",
   "bugs": {
-    "url": "https://github.com/rootAyaka/dsh-think-command/issues"
+    "url": "https://github.com/shorekeeper-blackshore/dsh-think-command/issues"
   },
   "meta": {
     "title": "思考等级指令 /think",
