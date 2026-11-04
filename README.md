@@ -152,4 +152,4 @@ SessionManager 捕获、QQ 点击填充指令条（`<qqbot-cmd-input>`）与回�
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 shorekeeper-blackshore
