@@ -1,6 +1,6 @@
 {
   "name": "dsh-think-command-v3",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Human-facing /think command: inspect and switch the current session's reasoning (thinking) level; works in the Web command adapter and on the QQ bot channel",
   "private": true,
   "type": "module",

@@ -13,7 +13,7 @@
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 
 // The plugin writes a bridge diagnostic file on activation; keep the offline
@@ -33,7 +33,12 @@ const plugin = await import(
 const sdkPackage = plugin.installedPackage(PROFILE_DIR, '@tencent-connect/qqbot-nodejs')
 const qqbotPackage = plugin.installedPackage(PROFILE_DIR, '@tencent-connect/dsh-qqbot')
 const sdk = await import(pathToFileURL(sdkPackage.entry).href)
-const sm = await import(pathToFileURL(path.join(qqbotPackage.packageDir, 'dist/session/session-manager.js')).href)
+const sessionManagerPath = plugin.sessionManagerModulePath(qqbotPackage)
+assert.ok(sessionManagerPath, 'the installed qqbot package exposes a SessionManager module')
+const sm = await import(pathToFileURL(sessionManagerPath).href)
+const sessionIds = await import(
+  pathToFileURL(path.join(path.dirname(sessionManagerPath), 'session-id.js')).href
+)
 
 let failures = 0
 const check = (name, fn) => {
@@ -130,9 +135,41 @@ await checkAsync('derivedSessionId matches the qqbot plugin derivation', async (
     { appId: 'app-123' },
     { info() {}, warn() {}, debug() {}, error() {} },
   )
-  const expected = manager.deriveSessionId('qqbot:app-123:c2c:peer-1')
+  const derive =
+    typeof manager.deriveSessionId === 'function'
+      ? manager.deriveSessionId.bind(manager)
+      : sessionIds.legacyDerivedSessionId
+  const expected = derive('qqbot:app-123:c2c:peer-1')
   assert.equal(plugin.derivedSessionId('app-123', 'c2c', 'peer-1'), expected)
   manager.evictor?.dispose?.()
+})
+
+check('sessionManagerModulePath supports both lib/ (entry) and dist/ layouts', () => {
+  /** Create an empty fixture file and return its absolute path. */
+  const touch = (root, relative) => {
+    const file = path.join(root, relative)
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, '')
+    return file
+  }
+
+  // qqbot 0.5.x: the package entry is lib/index.js and the module sits beside it.
+  const libRoot = mkdtempSync(path.join(tmpdir(), 'dsh-qqbot-layout-'))
+  const libEntry = touch(libRoot, 'lib/index.js')
+  const libModule = touch(libRoot, 'lib/session/session-manager.js')
+  assert.equal(
+    plugin.sessionManagerModulePath({ packageDir: libRoot, entry: libEntry }),
+    libModule,
+  )
+
+  // qqbot 0.4.x published the same files under dist/.
+  const distRoot = mkdtempSync(path.join(tmpdir(), 'dsh-qqbot-layout-'))
+  const distEntry = touch(distRoot, 'dist/index.js')
+  const distModule = touch(distRoot, 'dist/session/session-manager.js')
+  assert.equal(
+    plugin.sessionManagerModulePath({ packageDir: distRoot, entry: distEntry }),
+    distModule,
+  )
 })
 
 await checkAsync('bridge install patches the real QQBot/SessionManager prototypes', async () => {
